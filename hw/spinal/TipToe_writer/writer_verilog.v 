@@ -1,0 +1,134 @@
+`timescale 1ns / 1ps
+`define __DEBUG__
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 11/19/2024 08:38:06 AM
+// Design Name: 
+// Module Name: logger_writer
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module logger_writer # (
+    parameter STORAGE_SIZE = 1024 * 1024,
+    parameter LOG_BASE_ADDR = 'h80000000,
+    parameter ID_WIDTH = 16,
+    parameter ADDR_WIDTH = 32,
+    parameter DATA_WIDTH = 128,
+    parameter FULL_PAYLOAD_WIDTH = 0,
+    localparam STORAGE_DATA_WIDTH = 256,
+    localparam ENTRY_PER_PAGE = STORAGE_DATA_WIDTH / FULL_PAYLOAD_WIDTH
+    ) (
+
+    output wire axi_m2_wvalid,
+    input wire axi_m2_wready,
+    output wire[STORAGE_DATA_WIDTH-1:0] axi_m2_wdata,
+    output wire axi_m2_wlast,
+    output wire[STORAGE_DATA_WIDTH/8-1:0] axi_m2_wstrb,
+    output wire[ID_WIDTH-1:0] axi_m2_wid,
+
+    input wire axi_m2_bvalid,
+    output wire axi_m2_bready,
+    input wire[1:0] axi_m2_bresp,
+    input wire[ID_WIDTH-1:0] axi_m2_bid
+    );
+
+    reg second_queue_input_valid;
+    wire second_queue_input_ready;
+    wire second_queue_output_valid;
+    wire second_queue_output_ready;
+    wire[FULL_PAYLOAD_WIDTH-1:0] second_queue_output_payload;
+    wire second_queue_empty;
+
+    QueueStream #(
+        .DATA_SIZE(FULL_PAYLOAD_WIDTH),
+        .QUEUE_LENGTH(8)
+    ) second_queue (
+        .clock(clk),
+        .reset(!aresetn),
+        
+        .input_valid(second_queue_input_valid),
+        .input_ready(second_queue_input_ready),
+        .input_data(write_payload),
+        
+        .output_valid(second_queue_output_valid),
+        .output_ready(second_queue_output_ready),
+        .output_data(second_queue_output_payload),
+        
+        .debug_is_empty(second_queue_empty)
+    );
+
+    reg aw_state;
+    reg[$clog2(STORAGE_SIZE/(FULL_PAYLOAD_WIDTH/8))-1:0] idx;
+    reg _write_ready;
+    wire[3:0] inner_idx;
+
+    always @ (posedge clk) begin
+        if (!aresetn) begin
+            aw_state <= 0;
+            _write_ready <= 0;
+            second_queue_input_valid <= 0;
+            idx <= 0;
+        end
+        else if (aw_state == 0 && axi_m2_awvalid && axi_m2_awready) begin
+            _write_ready <= 1;
+            aw_state <= 1;
+            second_queue_input_valid <= 1;
+        end
+        else if (aw_state == 1 && second_queue_input_valid && second_queue_input_ready) begin
+            aw_state <= 0;
+            idx <= idx + 1;
+            _write_ready <= 0;
+            second_queue_input_valid <= 0;
+        end
+        else begin
+            aw_state <= aw_state;
+        end
+    end
+    
+    assign inner_idx = (idx - 1) % ENTRY_PER_PAGE;
+
+    assign write_ready = _write_ready && second_queue_input_valid && second_queue_input_ready;
+    assign second_queue_output_ready = axi_m2_wvalid && axi_m2_wready;
+
+    assign axi_m2_awvalid = (aw_state == 0 && write_valid);
+    assign axi_m2_awaddr = LOG_BASE_ADDR + idx * FULL_PAYLOAD_WIDTH / 8;
+    assign axi_m2_awlen = 0;
+    // assign axi_m2_awsize = 'b101; // 256
+    assign axi_m2_awsize = FULL_PAYLOAD_WIDTH == 256 ? 'b101 :
+                          FULL_PAYLOAD_WIDTH == 128 ? 'b100 :
+                          FULL_PAYLOAD_WIDTH == 64 ? 'b011 :
+                          FULL_PAYLOAD_WIDTH == 32 ? 'b010 :
+                          FULL_PAYLOAD_WIDTH == 16 ? 'b001 :
+                          FULL_PAYLOAD_WIDTH == 8 ? 'b000 :
+                          'b000;
+    assign axi_m2_awburst = 'b01;
+    assign axi_m2_awlock = 0;
+    assign axi_m2_awcache = 0;
+    assign axi_m2_awprot = 0;
+    assign axi_m2_awqos = 0;
+    assign axi_m2_awregion = 0;
+    assign axi_m2_awid = 0;
+
+    assign axi_m2_wvalid = second_queue_output_valid;
+    assign axi_m2_wdata = second_queue_output_payload << (FULL_PAYLOAD_WIDTH * inner_idx);
+    // assign axi_m2_wdata = {second_queue_output_payload, {(FULL_PAYLOAD_WIDTH)*(inner_idx){1'b0}}};
+    assign axi_m2_wlast = 1;
+    assign axi_m2_wstrb = {(FULL_PAYLOAD_WIDTH/8){1'b1}} << (FULL_PAYLOAD_WIDTH/8*inner_idx);
+    // assign axi_m2_wstrb = {(FULL_PAYLOAD_WIDTH/8){1'b1}, {(FULL_PAYLOAD_WIDTH/8)*(inner_idx){1'b0}}};
+    assign axi_m2_wid = 0;
+
+    assign axi_m2_bready = 1;
+endmodule
